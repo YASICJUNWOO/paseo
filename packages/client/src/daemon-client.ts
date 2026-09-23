@@ -477,6 +477,14 @@ export interface FileReadResult {
   modifiedAt: string;
   revision?: string;
 }
+export interface FileDownloadProgress {
+  receivedBytes: number;
+  totalBytes: number;
+}
+export interface DownloadFileOptions {
+  requestId?: string;
+  onProgress?: (progress: FileDownloadProgress) => void;
+}
 export interface FileUploadInput {
   fileName: string;
   mimeType: string;
@@ -881,6 +889,7 @@ interface PendingBinaryFileRead {
   cwd: string;
   path: string;
   maxBytes?: number;
+  onProgress?: (progress: FileDownloadProgress) => void;
 }
 
 interface BinaryFileTransferState extends PendingBinaryFileRead {
@@ -893,6 +902,27 @@ interface BinaryFileTransferState extends PendingBinaryFileRead {
   modifiedAt: string;
   revision?: string;
   chunks: Uint8Array[];
+  receivedBytes: number;
+}
+
+interface BinaryFileReadRequest {
+  cwd: string;
+  path: string;
+  requestId?: string;
+  maxBytes?: number;
+  timeout?: number;
+  onProgress?: (progress: FileDownloadProgress) => void;
+}
+
+type BinaryFileReadOutcome =
+  | { kind: "binary"; result: FileReadResult }
+  | { kind: "legacy"; file: LegacyFileExplorerFilePayload };
+
+interface FileExplorerRequestOptions {
+  requestId?: string;
+  acceptBinary?: boolean;
+  maxBytes?: number;
+  timeout?: number;
 }
 
 type RpcWaitResult<T> = { kind: "ok"; value: T } | { kind: "error"; error: DaemonRpcError };
@@ -974,6 +1004,7 @@ function toTimeoutError(error: unknown, label: string, timeoutMs: number): Error
 const DEFAULT_RECONNECT_BASE_DELAY_MS = 1500;
 const DEFAULT_RECONNECT_MAX_DELAY_MS = 30000;
 const DEFAULT_SESSION_RPC_TIMEOUT_MS = 60_000;
+const DEFAULT_FILE_DOWNLOAD_TIMEOUT_MS = 15 * 60 * 1000;
 const PUSH_TOKEN_REVOCATION_TIMEOUT_MS = 2_000;
 const DEFAULT_CONNECT_TIMEOUT_MS = 15_000;
 const DEFAULT_LIVENESS_TIMEOUT_MS = 5000;
@@ -4593,10 +4624,9 @@ export class DaemonClient {
     cwd: string,
     path: string,
     mode: "list" | "file",
-    requestId?: string,
-    acceptBinary = false,
-    maxBytes?: number,
+    options: FileExplorerRequestOptions = {},
   ): Promise<FileExplorerPayload> {
+    const { requestId, acceptBinary, maxBytes, timeout } = options;
     return this.sendCorrelatedSessionRequest({
       requestId,
       message: {
@@ -4608,6 +4638,7 @@ export class DaemonClient {
         ...(maxBytes ? { maxBytes } : {}),
       },
       responseType: "file_explorer_response",
+      timeout,
     });
   }
 
@@ -4616,7 +4647,7 @@ export class DaemonClient {
     path: string,
     requestId?: string,
   ): Promise<FileExplorerDirectoryPayload> {
-    const payload = await this.requestFileExplorer(cwd, path, "list", requestId);
+    const payload = await this.requestFileExplorer(cwd, path, "list", { requestId });
     if (payload.error) {
       throw new Error(payload.error);
     }
@@ -4632,29 +4663,58 @@ export class DaemonClient {
     requestId?: string,
     maxBytes?: number,
   ): Promise<FileReadResult> {
-    const resolvedRequestId = this.createRequestId(requestId);
-    this.pendingBinaryFileReads.set(resolvedRequestId, { cwd, path, maxBytes });
+    const outcome = await this.readBinaryFile({ cwd, path, requestId, maxBytes });
+    return outcome.kind === "binary" ? outcome.result : legacyExplorerFileToBytes(outcome.file);
+  }
+
+  /**
+   * Streams a whole workspace file over the session, so it works on every
+   * connection type (relay, SSH, sockets), unlike the HTTP token download.
+   */
+  async downloadFile(
+    cwd: string,
+    path: string,
+    options: DownloadFileOptions = {},
+  ): Promise<FileReadResult> {
+    const outcome = await this.readBinaryFile({
+      cwd,
+      path,
+      requestId: options.requestId,
+      onProgress: options.onProgress,
+      timeout: DEFAULT_FILE_DOWNLOAD_TIMEOUT_MS,
+    });
+    if (outcome.kind === "binary") {
+      return outcome.result;
+    }
+    if (outcome.file.encoding === "none") {
+      throw new Error("File content unavailable for download.");
+    }
+    return legacyExplorerFileToBytes(outcome.file);
+  }
+
+  private async readBinaryFile(request: BinaryFileReadRequest): Promise<BinaryFileReadOutcome> {
+    const { cwd, path, maxBytes, onProgress, timeout } = request;
+    const resolvedRequestId = this.createRequestId(request.requestId);
+    this.pendingBinaryFileReads.set(resolvedRequestId, { cwd, path, maxBytes, onProgress });
     try {
-      const payload = await this.requestFileExplorer(
-        cwd,
-        path,
-        "file",
-        resolvedRequestId,
-        true,
+      const payload = await this.requestFileExplorer(cwd, path, "file", {
+        requestId: resolvedRequestId,
+        acceptBinary: true,
         maxBytes,
-      );
+        timeout,
+      });
       if (payload.error) {
         throw new Error(payload.error);
       }
       const binaryResult = this.completedBinaryFileReads.get(resolvedRequestId);
       if (binaryResult) {
         this.completedBinaryFileReads.delete(resolvedRequestId);
-        return binaryResult;
+        return { kind: "binary", result: binaryResult };
       }
       if (!payload.file) {
         throw new Error("File unavailable.");
       }
-      return legacyExplorerFileToBytes(payload.file);
+      return { kind: "legacy", file: payload.file };
     } finally {
       this.pendingBinaryFileReads.delete(resolvedRequestId);
       this.activeBinaryFileTransfers.delete(resolvedRequestId);
@@ -6222,7 +6282,9 @@ export class DaemonClient {
         modifiedAt: frame.metadata.modifiedAt,
         revision: frame.metadata.revision,
         chunks: [],
+        receivedBytes: 0,
       });
+      pending.onProgress?.({ receivedBytes: 0, totalBytes: frame.metadata.size });
       return;
     }
 
@@ -6238,24 +6300,23 @@ export class DaemonClient {
         return;
       }
       transfer.chunks.push(frame.payload);
+      transfer.receivedBytes += frame.payload.byteLength;
+      transfer.onProgress?.({ receivedBytes: transfer.receivedBytes, totalBytes: transfer.size });
       return;
     }
 
     // COMPAT(fileReadByteBudget): added in v0.5.0, remove after 2027-02-21 once daemon floor >= v0.5.0.
     if (transfer.maxBytes && transfer.size > transfer.maxBytes) {
-      this.activeBinaryFileTransfers.delete(frame.requestId);
-      this.handleSessionMessage({
-        type: "file_explorer_response",
-        payload: {
-          cwd: transfer.cwd,
-          path: transfer.path,
-          mode: "file",
-          directory: null,
-          file: null,
-          error: "File is too large to display",
-          requestId: frame.requestId,
-        },
-      });
+      this.failBinaryFileTransfer(frame.requestId, transfer, "File is too large to display");
+      return;
+    }
+
+    if (transfer.receivedBytes !== transfer.size) {
+      this.failBinaryFileTransfer(
+        frame.requestId,
+        transfer,
+        `File transfer incomplete: expected ${transfer.size} bytes, received ${transfer.receivedBytes}.`,
+      );
       return;
     }
 
@@ -6280,6 +6341,26 @@ export class DaemonClient {
         file: null,
         error: null,
         requestId: frame.requestId,
+      },
+    });
+  }
+
+  private failBinaryFileTransfer(
+    requestId: string,
+    transfer: BinaryFileTransferState,
+    error: string,
+  ): void {
+    this.activeBinaryFileTransfers.delete(requestId);
+    this.handleSessionMessage({
+      type: "file_explorer_response",
+      payload: {
+        cwd: transfer.cwd,
+        path: transfer.path,
+        mode: "file",
+        directory: null,
+        file: null,
+        error,
+        requestId,
       },
     });
   }
