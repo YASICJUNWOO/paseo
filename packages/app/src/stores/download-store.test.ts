@@ -11,6 +11,7 @@ import {
   type Download,
   type DownloadFileOverSession,
 } from "@/stores/download-store";
+import { DownloadUserError } from "@/stores/download-user-error";
 import {
   createFakeDownloadedFileSaver,
   type FakeDownloadedFileSaver,
@@ -99,7 +100,7 @@ describe("download store session transport", () => {
     ]);
   });
 
-  it("reports an untyped session error verbatim and saves nothing", async () => {
+  it("shows the generic localized failure for an untyped session error and saves nothing", async () => {
     const download = await startSessionDownload({
       downloadFileOverSession: async () => {
         throw new Error("Daemon client closed");
@@ -110,8 +111,22 @@ describe("download store session transport", () => {
     expect(download).toMatchObject({
       fileName: FILE_NAME,
       status: "error",
-      message: "Daemon client closed",
+      message: i18n.t("downloads.failed"),
     });
+    expect(download?.message).not.toContain("Daemon client closed");
+    expect(saver.savedFiles).toEqual([]);
+  });
+
+  it("shows the message of a user-facing download error as is", async () => {
+    const userMessage = i18n.t("workspace.terminal.hostDisconnected");
+    const download = await startSessionDownload({
+      downloadFileOverSession: async () => {
+        throw new DownloadUserError(userMessage);
+      },
+      saver,
+    });
+
+    expect(download).toMatchObject({ fileName: FILE_NAME, status: "error", message: userMessage });
     expect(saver.savedFiles).toEqual([]);
   });
 
@@ -166,7 +181,7 @@ describe("download store session transport", () => {
     expect(download?.message).toContain("128 MB");
   });
 
-  it("reports the save error when the transfer succeeds but saving fails", async () => {
+  it("shows the generic localized failure when the transfer succeeds but saving fails", async () => {
     saver.failNextSave(new Error("No download directory available."));
 
     const download = await startSessionDownload({
@@ -177,8 +192,9 @@ describe("download store session transport", () => {
     expect(download).toMatchObject({
       fileName: FILE_NAME,
       status: "error",
-      message: "No download directory available.",
+      message: i18n.t("downloads.failed"),
     });
+    expect(download?.message).not.toContain("No download directory available.");
     expect(saver.savedFiles).toEqual([]);
   });
 });

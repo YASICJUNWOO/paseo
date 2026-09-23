@@ -17,6 +17,7 @@ import {
 } from "@/utils/download-files";
 import { isWeb } from "@/constants/platform";
 import { i18n } from "@/i18n/i18next";
+import { DownloadUserError } from "@/stores/download-user-error";
 
 export interface Download {
   id: string;
@@ -139,11 +140,8 @@ export const useDownloadStore = create<DownloadState>()((set, get) => ({
         });
       }
     } catch (error) {
-      const message = error instanceof Error ? error.message : i18n.t("downloads.failed");
-      if (isWeb) {
-        console.warn("[DownloadStore] Download failed:", message);
-      }
-      get().failDownload(id, message);
+      console.warn("[DownloadStore] Download failed:", error);
+      get().failDownload(id, toUserFacingDownloadMessage(error));
     }
   },
 
@@ -210,6 +208,10 @@ export const useDownloadStore = create<DownloadState>()((set, get) => ({
   },
 }));
 
+function toUserFacingDownloadMessage(error: unknown): string {
+  return error instanceof DownloadUserError ? error.message : i18n.t("downloads.failed");
+}
+
 function findMostRecentDownloadId(downloads: Map<string, Download>): string | null {
   let mostRecent: Download | null = null;
   for (const download of downloads.values()) {
@@ -238,12 +240,15 @@ async function runHttpDownload(input: HttpDownloadInput): Promise<void> {
   const { connection, fileName, path, requestFileDownloadToken, callbacks } = input;
   const tokenResponse = await requestFileDownloadToken(path);
   if (tokenResponse.error || !tokenResponse.token) {
-    throw new Error(tokenResponse.error ?? i18n.t("downloads.requestTokenFailed"));
+    if (tokenResponse.error) {
+      console.warn("[DownloadStore] Download token request failed:", tokenResponse.error);
+    }
+    throw new DownloadUserError(i18n.t("downloads.requestTokenFailed"));
   }
 
   const downloadTarget = resolveDaemonDownloadTarget(connection);
   if (!downloadTarget.baseUrl) {
-    throw new Error(i18n.t("downloads.hostUnavailable"));
+    throw new DownloadUserError(i18n.t("downloads.hostUnavailable"));
   }
 
   const resolvedFileName = tokenResponse.fileName ?? fileName;
@@ -282,7 +287,7 @@ async function runHttpDownload(input: HttpDownloadInput): Promise<void> {
 
   const result = await downloadResumable.downloadAsync();
   if (!result) {
-    throw new Error(i18n.t("downloads.cancelled"));
+    throw new DownloadUserError(i18n.t("downloads.cancelled"));
   }
 
   callbacks.onComplete();
@@ -331,18 +336,20 @@ function localizeSessionDownloadError(error: unknown): unknown {
   if (!(error instanceof FileDownloadError)) {
     return error;
   }
-  console.warn("[DownloadStore] Session download failed:", error.code, error.message);
   switch (error.code) {
     case "too_large":
-      return new Error(
+      return new DownloadUserError(
         i18n.t("downloads.tooLarge", {
           limit: `${MAX_SESSION_DOWNLOAD_BYTES / BYTES_PER_MEGABYTE} MB`,
         }),
+        { cause: error },
       );
     case "incomplete":
-      return new Error(i18n.t("downloads.incomplete"));
+      return new DownloadUserError(i18n.t("downloads.incomplete"), { cause: error });
     case "content_unavailable":
-      return new Error(i18n.t("downloads.contentUnavailable"));
+      return new DownloadUserError(i18n.t("downloads.contentUnavailable"), {
+        cause: error,
+      });
   }
 }
 

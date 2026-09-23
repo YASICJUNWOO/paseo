@@ -8,6 +8,7 @@ import {
 import { explorerFileFromReadResult } from "@/file-explorer/read-result";
 import { parentExplorerPath } from "@/utils/explorer-paths";
 import type { DownloadFileOverSession } from "@/stores/download-store";
+import { DownloadUserError } from "@/stores/download-user-error";
 
 function createExplorerState(): AgentFileExplorerState {
   return {
@@ -240,10 +241,10 @@ export function useFileExplorerActions(params: { serverId: string } & FileExplor
   const requestFileDownloadToken = useCallback(
     async (path: string) => {
       if (!normalizedWorkspaceRoot) {
-        throw new Error(t("workspace.fileExplorer.states.unavailable"));
+        throw new DownloadUserError(t("workspace.fileExplorer.states.unavailable"));
       }
       if (!client) {
-        throw new Error(t("workspace.terminal.hostDisconnected"));
+        throw new DownloadUserError(t("workspace.terminal.hostDisconnected"));
       }
       const payload = await client.requestDownloadToken(normalizedWorkspaceRoot, path);
       if (payload.error) {
@@ -257,10 +258,10 @@ export function useFileExplorerActions(params: { serverId: string } & FileExplor
   const downloadFileOverSession = useCallback<DownloadFileOverSession>(
     async (path, { maxBytes, onProgress }) => {
       if (!normalizedWorkspaceRoot) {
-        throw new Error(t("workspace.fileExplorer.states.unavailable"));
+        throw new DownloadUserError(t("workspace.fileExplorer.states.unavailable"));
       }
       if (!client) {
-        throw new Error(t("workspace.terminal.hostDisconnected"));
+        throw new DownloadUserError(t("workspace.terminal.hostDisconnected"));
       }
       return client.downloadFile(normalizedWorkspaceRoot, path, { maxBytes, onProgress });
     },
