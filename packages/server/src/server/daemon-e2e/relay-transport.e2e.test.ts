@@ -845,6 +845,8 @@ async function waitForCapturedLog(
       await client.connect();
       const progress: FileDownloadProgress[] = [];
       const result = await client.downloadFile(workspaceDir, fileName, {
+        // Exactly the file size: the daemon's size check must let it through.
+        maxBytes: source.byteLength,
         onProgress: (update) => progress.push(update),
       });
 

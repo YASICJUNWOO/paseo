@@ -145,6 +145,7 @@ import {
   decodeFileTransferFrame,
   encodeFileTransferFrame,
   decodeTerminalStreamFrame,
+  FILE_TOO_LARGE_ERROR,
   FileTransferOpcode,
   TerminalStreamOpcode,
   type FileTransferFrame,
@@ -483,6 +484,8 @@ export interface FileDownloadProgress {
 }
 export interface DownloadFileOptions {
   requestId?: string;
+  /** The daemon refuses larger files; `downloadFile` then throws `FileDownloadError` "too_large". */
+  maxBytes?: number;
   onProgress?: (progress: FileDownloadProgress) => void;
 }
 export interface FileUploadInput {
@@ -914,9 +917,13 @@ interface BinaryFileReadRequest {
   onProgress?: (progress: FileDownloadProgress) => void;
 }
 
+/** Transfer failures the client itself detects from the binary frames. */
+type BinaryFileTransferFailure = "too_large" | "incomplete";
+
 type BinaryFileReadOutcome =
   | { kind: "binary"; result: FileReadResult }
-  | { kind: "legacy"; file: LegacyFileExplorerFilePayload };
+  | { kind: "legacy"; file: LegacyFileExplorerFilePayload }
+  | { kind: "failed"; message: string; failure: BinaryFileTransferFailure | null };
 
 interface FileExplorerRequestOptions {
   requestId?: string;
@@ -954,6 +961,29 @@ export class DaemonConnectionError extends Error {
     super(message);
     this.name = "DaemonConnectionError";
   }
+}
+
+export type FileDownloadErrorCode = "too_large" | "incomplete" | "content_unavailable";
+
+/** A `downloadFile` failure the caller can act on or localize by `code`. */
+export class FileDownloadError extends Error {
+  constructor(
+    message: string,
+    readonly code: FileDownloadErrorCode,
+  ) {
+    super(message);
+    this.name = "FileDownloadError";
+  }
+}
+
+function toFileDownloadError(outcome: Extract<BinaryFileReadOutcome, { kind: "failed" }>): Error {
+  if (outcome.failure) {
+    return new FileDownloadError(outcome.message, outcome.failure);
+  }
+  if (outcome.message === FILE_TOO_LARGE_ERROR) {
+    return new FileDownloadError(outcome.message, "too_large");
+  }
+  return new Error(outcome.message);
 }
 
 class DaemonRpcError extends Error {
@@ -1202,6 +1232,7 @@ export class DaemonClient {
   private pendingBinaryFileReads = new Map<string, PendingBinaryFileRead>();
   private activeBinaryFileTransfers = new Map<string, BinaryFileTransferState>();
   private completedBinaryFileReads = new Map<string, FileReadResult>();
+  private failedBinaryFileReads = new Map<string, BinaryFileTransferFailure>();
   private logger: Logger;
   private pendingSendQueue: PendingSend[] = [];
   private readonly logConnectionPath: "direct" | "relay";
@@ -4664,12 +4695,16 @@ export class DaemonClient {
     maxBytes?: number,
   ): Promise<FileReadResult> {
     const outcome = await this.readBinaryFile({ cwd, path, requestId, maxBytes });
+    if (outcome.kind === "failed") {
+      throw new Error(outcome.message);
+    }
     return outcome.kind === "binary" ? outcome.result : legacyExplorerFileToBytes(outcome.file);
   }
 
   /**
    * Streams a whole workspace file over the session, so it works on every
    * connection type (relay, SSH, sockets), unlike the HTTP token download.
+   * Throws `FileDownloadError` for too-large, incomplete, or content-less files.
    */
   async downloadFile(
     cwd: string,
@@ -4680,14 +4715,18 @@ export class DaemonClient {
       cwd,
       path,
       requestId: options.requestId,
+      maxBytes: options.maxBytes,
       onProgress: options.onProgress,
       timeout: DEFAULT_FILE_DOWNLOAD_TIMEOUT_MS,
     });
+    if (outcome.kind === "failed") {
+      throw toFileDownloadError(outcome);
+    }
     if (outcome.kind === "binary") {
       return outcome.result;
     }
     if (outcome.file.encoding === "none") {
-      throw new Error("File content unavailable for download.");
+      throw new FileDownloadError("File content unavailable for download.", "content_unavailable");
     }
     return legacyExplorerFileToBytes(outcome.file);
   }
@@ -4704,7 +4743,8 @@ export class DaemonClient {
         timeout,
       });
       if (payload.error) {
-        throw new Error(payload.error);
+        const failure = this.failedBinaryFileReads.get(resolvedRequestId) ?? null;
+        return { kind: "failed", message: payload.error, failure };
       }
       const binaryResult = this.completedBinaryFileReads.get(resolvedRequestId);
       if (binaryResult) {
@@ -4718,6 +4758,7 @@ export class DaemonClient {
     } finally {
       this.pendingBinaryFileReads.delete(resolvedRequestId);
       this.activeBinaryFileTransfers.delete(resolvedRequestId);
+      this.failedBinaryFileReads.delete(resolvedRequestId);
     }
   }
 
@@ -6307,16 +6348,18 @@ export class DaemonClient {
 
     // COMPAT(fileReadByteBudget): added in v0.5.0, remove after 2027-02-21 once daemon floor >= v0.5.0.
     if (transfer.maxBytes && transfer.size > transfer.maxBytes) {
-      this.failBinaryFileTransfer(frame.requestId, transfer, "File is too large to display");
+      this.failBinaryFileTransfer(frame.requestId, transfer, {
+        failure: "too_large",
+        error: FILE_TOO_LARGE_ERROR,
+      });
       return;
     }
 
     if (transfer.receivedBytes !== transfer.size) {
-      this.failBinaryFileTransfer(
-        frame.requestId,
-        transfer,
-        `File transfer incomplete: expected ${transfer.size} bytes, received ${transfer.receivedBytes}.`,
-      );
+      this.failBinaryFileTransfer(frame.requestId, transfer, {
+        failure: "incomplete",
+        error: `File transfer incomplete: expected ${transfer.size} bytes, received ${transfer.receivedBytes}.`,
+      });
       return;
     }
 
@@ -6348,9 +6391,10 @@ export class DaemonClient {
   private failBinaryFileTransfer(
     requestId: string,
     transfer: BinaryFileTransferState,
-    error: string,
+    { failure, error }: { failure: BinaryFileTransferFailure; error: string },
   ): void {
     this.activeBinaryFileTransfers.delete(requestId);
+    this.failedBinaryFileReads.set(requestId, failure);
     this.handleSessionMessage({
       type: "file_explorer_response",
       payload: {

@@ -1,6 +1,12 @@
 import { beforeEach, describe, expect, it } from "vitest";
-import type { FileReadResult } from "@getpaseo/client/internal/daemon-client";
 import {
+  FileDownloadError,
+  type FileDownloadErrorCode,
+  type FileReadResult,
+} from "@getpaseo/client/internal/daemon-client";
+import { i18n } from "@/i18n/i18next";
+import {
+  MAX_SESSION_DOWNLOAD_BYTES,
   useDownloadStore,
   type Download,
   type DownloadFileOverSession,
@@ -31,7 +37,7 @@ function rejectTokenRequest(): Promise<never> {
 
 async function streamWholeFile(
   _path: string,
-  onProgress: Parameters<DownloadFileOverSession>[1],
+  { onProgress }: Parameters<DownloadFileOverSession>[1],
 ): Promise<FileReadResult> {
   onProgress({ receivedBytes: FILE_BYTES.byteLength / 2, totalBytes: FILE_BYTES.byteLength });
   onProgress({ receivedBytes: FILE_BYTES.byteLength, totalBytes: FILE_BYTES.byteLength });
@@ -67,16 +73,16 @@ describe("download store session transport", () => {
   });
 
   it("streams the file over the session and saves the exact bytes", async () => {
-    const requestedPaths: string[] = [];
+    const requests: Array<{ path: string; maxBytes: number }> = [];
     const download = await startSessionDownload({
-      downloadFileOverSession: (path, onProgress) => {
-        requestedPaths.push(path);
-        return streamWholeFile(path, onProgress);
+      downloadFileOverSession: (path, options) => {
+        requests.push({ path, maxBytes: options.maxBytes });
+        return streamWholeFile(path, options);
       },
       saver,
     });
 
-    expect(requestedPaths).toEqual([FILE_PATH]);
+    expect(requests).toEqual([{ path: FILE_PATH, maxBytes: MAX_SESSION_DOWNLOAD_BYTES }]);
     expect(download).toMatchObject({
       serverId: "srv_relay_only",
       scopeId: "workspace-1",
@@ -93,10 +99,10 @@ describe("download store session transport", () => {
     ]);
   });
 
-  it("reports the session error and saves nothing when the transfer fails", async () => {
+  it("reports an untyped session error verbatim and saves nothing", async () => {
     const download = await startSessionDownload({
       downloadFileOverSession: async () => {
-        throw new Error("File transfer incomplete: expected 10 bytes, received 6.");
+        throw new Error("Daemon client closed");
       },
       saver,
     });
@@ -104,9 +110,60 @@ describe("download store session transport", () => {
     expect(download).toMatchObject({
       fileName: FILE_NAME,
       status: "error",
-      message: "File transfer incomplete: expected 10 bytes, received 6.",
+      message: "Daemon client closed",
     });
     expect(saver.savedFiles).toEqual([]);
+  });
+
+  const typedFailures: Array<{
+    code: FileDownloadErrorCode;
+    clientMessage: string;
+    expectedMessage: () => string;
+  }> = [
+    {
+      code: "too_large",
+      clientMessage: "File is too large to display",
+      expectedMessage: () => i18n.t("downloads.tooLarge", { limit: "128 MB" }),
+    },
+    {
+      code: "incomplete",
+      clientMessage: "File transfer incomplete: expected 10 bytes, received 6.",
+      expectedMessage: () => i18n.t("downloads.incomplete"),
+    },
+    {
+      code: "content_unavailable",
+      clientMessage: "File content unavailable for download.",
+      expectedMessage: () => i18n.t("downloads.contentUnavailable"),
+    },
+  ];
+
+  it.each(typedFailures)(
+    "shows the localized message for a $code session failure",
+    async ({ code, clientMessage, expectedMessage }) => {
+      const download = await startSessionDownload({
+        downloadFileOverSession: async () => {
+          throw new FileDownloadError(clientMessage, code);
+        },
+        saver,
+      });
+
+      const message = expectedMessage();
+      expect(message).not.toBe(clientMessage);
+      expect(message).not.toMatch(/^downloads\./);
+      expect(download).toMatchObject({ fileName: FILE_NAME, status: "error", message });
+      expect(saver.savedFiles).toEqual([]);
+    },
+  );
+
+  it("names the session size limit in the too-large message", async () => {
+    const download = await startSessionDownload({
+      downloadFileOverSession: async () => {
+        throw new FileDownloadError("File is too large to display", "too_large");
+      },
+      saver,
+    });
+
+    expect(download?.message).toContain("128 MB");
   });
 
   it("reports the save error when the transfer succeeds but saving fails", async () => {

@@ -87,16 +87,24 @@ interface ShareDownloadedFileInput {
   fileName: string;
 }
 
+/**
+ * Offers the saved file in the native share sheet. The file is already saved
+ * when this runs, so a share-sheet failure is logged and never fails the download.
+ */
 export async function shareDownloadedFile(input: ShareDownloadedFileInput): Promise<void> {
-  if (!(await Sharing.isAvailableAsync())) {
-    return;
+  try {
+    if (!(await Sharing.isAvailableAsync())) {
+      return;
+    }
+    await Sharing.shareAsync(input.uri, {
+      mimeType: input.mimeType ?? undefined,
+      dialogTitle: input.fileName
+        ? i18n.t("downloads.shareFileNamed", { fileName: input.fileName })
+        : i18n.t("downloads.shareFile"),
+    });
+  } catch (error) {
+    console.warn(`[DownloadStore] Share sheet failed for saved file ${input.uri}:`, error);
   }
-  await Sharing.shareAsync(input.uri, {
-    mimeType: input.mimeType ?? undefined,
-    dialogTitle: input.fileName
-      ? i18n.t("downloads.shareFileNamed", { fileName: input.fileName })
-      : i18n.t("downloads.shareFile"),
-  });
 }
 
 export function resolveDownloadTargetFile(fileName: string): FSFile {

@@ -1,6 +1,5 @@
 import { useCallback, useMemo } from "react";
 import { useTranslation } from "react-i18next";
-import type { FileDownloadProgress } from "@getpaseo/client/internal/daemon-client";
 import {
   useSessionStore,
   type AgentFileExplorerState,
@@ -8,6 +7,7 @@ import {
 } from "@/stores/session-store";
 import { explorerFileFromReadResult } from "@/file-explorer/read-result";
 import { parentExplorerPath } from "@/utils/explorer-paths";
+import type { DownloadFileOverSession } from "@/stores/download-store";
 
 function createExplorerState(): AgentFileExplorerState {
   return {
@@ -254,15 +254,15 @@ export function useFileExplorerActions(params: { serverId: string } & FileExplor
     [client, normalizedWorkspaceRoot, t],
   );
 
-  const downloadFileOverSession = useCallback(
-    async (path: string, onProgress: (progress: FileDownloadProgress) => void) => {
+  const downloadFileOverSession = useCallback<DownloadFileOverSession>(
+    async (path, { maxBytes, onProgress }) => {
       if (!normalizedWorkspaceRoot) {
         throw new Error(t("workspace.fileExplorer.states.unavailable"));
       }
       if (!client) {
         throw new Error(t("workspace.terminal.hostDisconnected"));
       }
-      return client.downloadFile(normalizedWorkspaceRoot, path, { onProgress });
+      return client.downloadFile(normalizedWorkspaceRoot, path, { maxBytes, onProgress });
     },
     [client, normalizedWorkspaceRoot, t],
   );

@@ -1,6 +1,10 @@
 import { create } from "zustand";
 import * as LegacyFileSystem from "expo-file-system/legacy";
-import type { FileDownloadProgress, FileReadResult } from "@getpaseo/client/internal/daemon-client";
+import {
+  FileDownloadError,
+  type FileDownloadProgress,
+  type FileReadResult,
+} from "@getpaseo/client/internal/daemon-client";
 import type { DirectTcpHostConnection } from "@/types/host-connection";
 import { buildDaemonWebSocketUrl } from "@/utils/daemon-endpoints";
 import type { DownloadTransport } from "@/utils/download-transport";
@@ -34,9 +38,19 @@ interface FileDownloadToken {
 
 export type RequestFileDownloadToken = (path: string) => Promise<FileDownloadToken>;
 
+const BYTES_PER_MEGABYTE = 1024 * 1024;
+
+// Session downloads hold the whole file in memory until it is saved, so large files could crash the app.
+export const MAX_SESSION_DOWNLOAD_BYTES = 128 * BYTES_PER_MEGABYTE;
+
+export interface SessionDownloadOptions {
+  maxBytes: number;
+  onProgress: (progress: FileDownloadProgress) => void;
+}
+
 export type DownloadFileOverSession = (
   path: string,
-  onProgress: (progress: FileDownloadProgress) => void,
+  options: SessionDownloadOptions,
 ) => Promise<FileReadResult>;
 
 interface StartDownloadParams {
@@ -290,22 +304,46 @@ interface SessionDownloadInput {
 async function runSessionDownload(input: SessionDownloadInput): Promise<void> {
   const { fileName, path, downloadFileOverSession, saveDownloadedFile, callbacks } = input;
   const downloadStartTime = Date.now();
-  const file = await downloadFileOverSession(path, ({ receivedBytes, totalBytes }) => {
-    const progress = computeDownloadProgress({
-      receivedBytes,
-      totalBytes,
-      startedAt: downloadStartTime,
-      now: Date.now(),
-    });
-    if (progress) {
-      callbacks.onProgress(progress);
-    }
+  const file = await downloadFileOverSession(path, {
+    maxBytes: MAX_SESSION_DOWNLOAD_BYTES,
+    onProgress: ({ receivedBytes, totalBytes }) => {
+      const progress = computeDownloadProgress({
+        receivedBytes,
+        totalBytes,
+        startedAt: downloadStartTime,
+        now: Date.now(),
+      });
+      if (progress) {
+        callbacks.onProgress(progress);
+      }
+    },
+  }).catch((error: unknown) => {
+    throw localizeSessionDownloadError(error);
   });
 
   await saveDownloadedFile(
     { bytes: file.bytes, mimeType: file.mime, fileName },
     { onSaved: callbacks.onComplete },
   );
+}
+
+function localizeSessionDownloadError(error: unknown): unknown {
+  if (!(error instanceof FileDownloadError)) {
+    return error;
+  }
+  console.warn("[DownloadStore] Session download failed:", error.code, error.message);
+  switch (error.code) {
+    case "too_large":
+      return new Error(
+        i18n.t("downloads.tooLarge", {
+          limit: `${MAX_SESSION_DOWNLOAD_BYTES / BYTES_PER_MEGABYTE} MB`,
+        }),
+      );
+    case "incomplete":
+      return new Error(i18n.t("downloads.incomplete"));
+    case "content_unavailable":
+      return new Error(i18n.t("downloads.contentUnavailable"));
+  }
 }
 
 function resolveDaemonDownloadTarget(connection: DirectTcpHostConnection): DownloadTarget {
