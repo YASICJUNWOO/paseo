@@ -527,6 +527,11 @@ export const ja: TranslationResources = {
         revealFailed: "エントリの表示に失敗しました",
         deleteFailed: "エントリの削除に失敗しました",
       },
+      reveal: {
+        outsideWorkspace: "このファイルはワークスペースの外にあります",
+        hidden: "このファイルは隠しファイルです。表示するには隠しファイルを表示してください。",
+        notFound: "ファイルにこのファイルが見つかりません",
+      },
       draft: {
         filePlaceholder: "ファイル名",
         folderPlaceholder: "フォルダ名",
@@ -634,6 +639,7 @@ export const ja: TranslationResources = {
         copyAgentId: "エージェントIDをコピー",
         copyTerminalId: "ターミナルIDをコピー",
         copyFilePath: "ファイルパスをコピー",
+        revealInFiles: "ファイルで表示",
         rename: "名前を変更",
         closeAbove: "上のタブを閉じる",
         closeBelow: "下のタブを閉じる",

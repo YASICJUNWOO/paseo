@@ -47,7 +47,12 @@ launch catalog. Individual tab menus close instances or move compatible tabs to 
 can be reordered, but the dock cannot be split. Selecting an Explorer tab does not change workspace
 focus.
 
-Cmd+E shows or hides Explorer without changing its selected view. Compact layouts use the combined
+Cmd+E shows or hides Explorer without changing its selected view. The Files tree never follows
+tab changes. Only **Reveal in Files**, from a file tab's menu or the Command Center, moves it:
+`packages/app/src/workspace-tabs/reveal-file-in-explorer.ts` shows Explorer on Files and leaves an
+ephemeral request that the tree finishes once it is visible and has restored its persisted
+expanded folders. The restore rewrites the expanded set when it lands, so a reveal that ran
+alongside it would lose its expansions. Workspace focus stays on the file tab. Compact layouts use the combined
 full-screen Explorer overlay for Changes, Files, and pull requests, and close it after a file opens. Compact Changes has no tree rail; its overview is the Jump to file action (`packages/app/src/git/jump-to-file/`), a sheet over the same changed-files tree the desktop rail renders.
 Wide native layouts without pane splits use the same combined content in a resizable inline dock;
 opening a file leaves that dock visible. Both presentations keep their selection in the panel store

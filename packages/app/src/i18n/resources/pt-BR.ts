@@ -526,6 +526,11 @@ export const ptBR: TranslationResources = {
         revealFailed: "Falha ao mostrar entrada",
         deleteFailed: "Falha ao excluir entrada",
       },
+      reveal: {
+        outsideWorkspace: "Este arquivo está fora do workspace",
+        hidden: "Este arquivo está oculto. Mostre os arquivos ocultos para vê-lo.",
+        notFound: "Arquivo não encontrado em Arquivos",
+      },
       draft: {
         filePlaceholder: "Nome do arquivo",
         folderPlaceholder: "Nome da pasta",
@@ -633,6 +638,7 @@ export const ptBR: TranslationResources = {
         copyAgentId: "Copiar ID do agente",
         copyTerminalId: "Copiar ID do terminal",
         copyFilePath: "Copiar caminho do arquivo",
+        revealInFiles: "Mostrar em Arquivos",
         rename: "Renomear",
         closeAbove: "Fechar abas acima",
         closeBelow: "Fechar abas abaixo",
