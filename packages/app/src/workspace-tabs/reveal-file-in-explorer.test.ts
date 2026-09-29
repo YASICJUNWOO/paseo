@@ -108,6 +108,35 @@ describe("revealFileInExplorer", () => {
     });
   });
 
+  it("records the request before the Explorer opens, so a tree mounting on open finds it", () => {
+    let requestsWhenOpened: unknown = null;
+    const unsubscribe = usePanelStore.subscribe((state, previous) => {
+      if (
+        state.mobilePanel.target === "file-explorer" &&
+        previous.mobilePanel.target !== state.mobilePanel.target
+      ) {
+        requestsWhenOpened = useExplorerRevealStore.getState().requests;
+      }
+    });
+
+    revealFileInExplorer({
+      isCompact: true,
+      workspaceKey: WORKSPACE_KEY,
+      workspaceId: "ws-main",
+      checkout: CHECKOUT,
+      path: "src/index.ts",
+    });
+    unsubscribe();
+
+    expect(requestsWhenOpened).toEqual({
+      [REVEAL_KEY]: {
+        path: "src/index.ts",
+        requestId: expect.any(Number),
+        createdAt: expect.any(Number),
+      },
+    });
+  });
+
   it("reveals on compact layouts without a workspace layout key", () => {
     const result = revealFileInExplorer({
       isCompact: true,

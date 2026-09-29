@@ -499,17 +499,26 @@ export function FileExplorerPane({
   const scrollbar = useOverlayFlatListScrollbar(treeListRef, { enabled: !isCompact });
 
   const hasInitializedRef = useRef(false);
-  // The workspace whose persisted expanded folders this tree has finished restoring. Reveal
-  // waits for it, because the restore rewrites the expanded set when it lands.
+  // The workspace whose persisted expanded folders this tree has finished restoring. A reveal
+  // waits for it: the restore rewrites the expanded set when it lands, which would drop the
+  // folders a reveal expanded alongside it.
   const [restoredWorkspaceStateKey, setRestoredWorkspaceStateKey] = useState<string | null>(null);
-  const currentWorkspaceStateKeyRef = useRef(workspaceStateKey);
+  // One generation per restore attempt, so only the newest attempt can open the gate. The pane
+  // stays mounted across workspace switches, so after A -> B -> A an older A restore can land
+  // while the newer one is still running; comparing workspace keys can't tell them apart.
+  const restoreGenerationRef = useRef(0);
 
   useEffect(() => {
     hasInitializedRef.current = false;
-    currentWorkspaceStateKeyRef.current = workspaceStateKey;
   }, [workspaceStateKey]);
 
   useEffect(() => {
+    // Runs that find a restore already started or done restore nothing and keep its generation.
+    if (!hasInitializedRef.current) {
+      restoreGenerationRef.current += 1;
+      setRestoredWorkspaceStateKey(null);
+    }
+    const generation = restoreGenerationRef.current;
     void settleExplorerTreeRestore({
       restore: initializeExplorer({
         hasWorkspaceScope,
@@ -521,7 +530,7 @@ export function FileExplorerPane({
         setExpandedPathsForWorkspace,
       }),
       attemptKey: workspaceStateKey,
-      isCurrentKey: (key) => key === currentWorkspaceStateKeyRef.current,
+      isCurrentAttempt: () => generation === restoreGenerationRef.current,
       onSettled: setRestoredWorkspaceStateKey,
     });
   }, [

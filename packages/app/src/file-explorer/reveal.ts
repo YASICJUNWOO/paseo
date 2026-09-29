@@ -70,17 +70,18 @@ export function isExplorerRevealRequestExpired(
  * Reports when the tree's restore of persisted expanded folders is over, so a reveal waiting on
  * it can start. `restore` resolves to the restored workspace key, or null when that call restored
  * nothing and a later run retries. A restore that throws is over too: it reports `attemptKey`
- * and rethrows, so a waiting reveal never sits out its TTL. A result for a workspace the tree has
- * since left is dropped.
+ * and rethrows, so a waiting reveal never sits out its TTL. A result from an attempt that is no
+ * longer the tree's newest is dropped, even for the same workspace: after A -> B -> A the first
+ * A restore can land while the second is still running.
  */
 export async function settleExplorerTreeRestore(input: {
   restore: Promise<string | null>;
   attemptKey: string | null;
-  isCurrentKey: (key: string) => boolean;
+  isCurrentAttempt: () => boolean;
   onSettled: (key: string) => void;
 }): Promise<void> {
   const settle = (key: string | null) => {
-    if (key && input.isCurrentKey(key)) {
+    if (key && input.isCurrentAttempt()) {
       input.onSettled(key);
     }
   };

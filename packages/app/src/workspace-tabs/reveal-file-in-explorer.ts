@@ -1,11 +1,7 @@
-import { resolveExplorerRevealPath } from "@/file-explorer/reveal";
+import { buildExplorerRevealKey, resolveExplorerRevealPath } from "@/file-explorer/reveal";
 import { useExplorerRevealStore } from "@/file-explorer/reveal-store";
 import { buildWorkspaceExplorerStateKey } from "@/hooks/use-file-explorer-actions";
-import {
-  openExplorerSidebarView,
-  usesCompactExplorerSidebar,
-  type ExplorerSidebarInput,
-} from "./explorer-sidebar";
+import { openExplorerSidebarView, type ExplorerSidebarInput } from "./explorer-sidebar";
 
 export interface RevealFileInExplorerInput extends ExplorerSidebarInput {
   workspaceId: string;
@@ -28,20 +24,23 @@ export function revealFileInExplorer(input: RevealFileInExplorerInput): RevealFi
         workspaceRoot: checkout.cwd,
       })
     : null;
-  // Mirrors openExplorerSidebarView: only the desktop pane needs the layout key.
-  const hasShell = usesCompactExplorerSidebar(input) || Boolean(input.workspaceKey);
-  if (!checkout || !workspaceStateKey || !hasShell) {
+  if (!checkout || !workspaceStateKey) {
     return "unavailable";
   }
   const path = resolveExplorerRevealPath({ path: input.path, workspaceRoot: checkout.cwd });
   if (!path) {
     return "outside-workspace";
   }
-  useExplorerRevealStore.getState().requestReveal({
-    serverId: checkout.serverId,
-    workspaceStateKey,
-    path,
-  });
-  openExplorerSidebarView({ ...input, view: "files" });
+  // Recorded before opening, so a tree that mounts or becomes visible during the open finds it.
+  // Rolled back when nothing opened, so it cannot replay on a later, unrelated open.
+  const store = useExplorerRevealStore.getState();
+  const requestId = store.requestReveal({ serverId: checkout.serverId, workspaceStateKey, path });
+  if (!openExplorerSidebarView({ ...input, view: "files" })) {
+    store.completeReveal({
+      key: buildExplorerRevealKey({ serverId: checkout.serverId, workspaceStateKey }),
+      requestId,
+    });
+    return "unavailable";
+  }
   return "revealing";
 }

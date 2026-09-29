@@ -398,12 +398,12 @@ describe("runExplorerReveal", () => {
 });
 
 describe("settleExplorerTreeRestore", () => {
-  function settle(restore: Promise<string | null>, currentKey = "ws-a") {
+  function settle(restore: Promise<string | null>, isCurrentAttempt = true) {
     const onSettled = vi.fn();
     const settled = settleExplorerTreeRestore({
       restore,
       attemptKey: "ws-a",
-      isCurrentKey: (key) => key === currentKey,
+      isCurrentAttempt: () => isCurrentAttempt,
       onSettled,
     });
     return { settled, onSettled };
@@ -429,8 +429,46 @@ describe("settleExplorerTreeRestore", () => {
   });
 
   it("ignores a restore that lands after the tree moved to another workspace", async () => {
-    const { settled, onSettled } = settle(Promise.resolve("ws-a"), "ws-b");
+    const { settled, onSettled } = settle(Promise.resolve("ws-a"), false);
     await settled;
+    expect(onSettled).not.toHaveBeenCalled();
+  });
+
+  it("ignores a stale restore of the same workspace while a newer one is still running", async () => {
+    // A -> B -> A: the first A restore lands while the second A restore is still rewriting the
+    // expanded set. The keys match; only the attempt tells them apart.
+    let currentAttempt = 1;
+    const onSettled = vi.fn();
+    let finishFirst: (key: string) => void = () => {};
+    let finishSecond: (key: string) => void = () => {};
+    const start = (restore: Promise<string>) => {
+      const attempt = currentAttempt;
+      return settleExplorerTreeRestore({
+        restore,
+        attemptKey: "ws-a",
+        isCurrentAttempt: () => attempt === currentAttempt,
+        onSettled,
+      });
+    };
+    const first = start(new Promise((resolve) => (finishFirst = resolve)));
+    currentAttempt = 2; // workspace B
+    currentAttempt = 3; // back to A
+    const second = start(new Promise((resolve) => (finishSecond = resolve)));
+
+    finishFirst("ws-a");
+    await first;
+    expect(onSettled).not.toHaveBeenCalled();
+
+    finishSecond("ws-a");
+    await second;
+    expect(onSettled).toHaveBeenCalledTimes(1);
+    expect(onSettled).toHaveBeenCalledWith("ws-a");
+  });
+
+  it("ignores a stale restore that threw, still rethrowing its error", async () => {
+    const failure = new Error("restore failed");
+    const { settled, onSettled } = settle(Promise.reject(failure), false);
+    await expect(settled).rejects.toBe(failure);
     expect(onSettled).not.toHaveBeenCalled();
   });
 });

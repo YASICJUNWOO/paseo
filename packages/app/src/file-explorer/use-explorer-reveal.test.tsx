@@ -28,6 +28,8 @@ const REVEAL_KEY = buildExplorerRevealKey({
   serverId: SERVER_ID,
   workspaceStateKey: WORKSPACE_STATE_KEY,
 });
+/** A sibling worktree: its tree has the same relative paths as the main one. */
+const SIBLING_WORKSPACE_STATE_KEY = "workspace:ws-sibling";
 
 function entry(path: string, kind: ExplorerEntry["kind"]): ExplorerEntry {
   return {
@@ -77,6 +79,7 @@ interface TreeState {
   expandedPaths: string[];
   active: boolean;
   isTreeRestored: boolean;
+  workspaceStateKey: string;
 }
 
 function createFixture(
@@ -93,6 +96,7 @@ function createFixture(
     expandedPaths: ["."],
     active: options.active ?? true,
     isTreeRestored: options.isTreeRestored ?? true,
+    workspaceStateKey: WORKSPACE_STATE_KEY,
   }));
   const listDirectory = options.listDirectory ?? listFromDisk;
   const scroller: ExplorerRevealScroller = options.scroller ?? {
@@ -123,6 +127,7 @@ function createFixture(
     const directories = tree((state) => state.directories);
     const expandedPaths = tree((state) => state.expandedPaths);
     const isTreeRestored = tree((state) => state.isTreeRestored);
+    const workspaceStateKey = tree((state) => state.workspaceStateKey);
     const listRows = useMemo(
       () =>
         flattenExplorerTree({
@@ -135,7 +140,7 @@ function createFixture(
     );
     return useExplorerReveal({
       serverId: SERVER_ID,
-      workspaceStateKey: WORKSPACE_STATE_KEY,
+      workspaceStateKey,
       directories,
       showHiddenFiles: false,
       listRows,
@@ -174,16 +179,14 @@ function createFixture(
   };
 }
 
-function requestReveal(path: string): number {
-  let requestId = 0;
+function requestReveal(path: string): void {
   act(() => {
-    requestId = useExplorerRevealStore.getState().requestReveal({
+    useExplorerRevealStore.getState().requestReveal({
       serverId: SERVER_ID,
       workspaceStateKey: WORKSPACE_STATE_KEY,
       path,
     });
   });
-  return requestId;
 }
 
 function deferredListing(): { listDirectory: ListDirectory; release: () => Promise<void> } {
@@ -343,13 +346,13 @@ describe("useExplorerReveal", () => {
   it("leaves the request pending while the tree has never been visible", async () => {
     const fixture = createFixture({ active: false });
 
-    const requestId = requestReveal("README.md");
+    requestReveal("README.md");
     await advance();
 
     expect(fixture.selectExplorerEntry).not.toHaveBeenCalled();
     expect(useExplorerRevealStore.getState().requests[REVEAL_KEY]).toEqual({
       path: "README.md",
-      requestId,
+      requestId: expect.any(Number),
       createdAt: expect.any(Number),
     });
   });
@@ -371,6 +374,32 @@ describe("useExplorerReveal", () => {
     expect(toast.show).not.toHaveBeenCalled();
     expect(toast.error).not.toHaveBeenCalled();
   });
+
+  it.each([
+    { path: "src/index.ts", outcome: "found" },
+    { path: "src/deleted.ts", outcome: "missing" },
+  ])(
+    "abandons a reveal ($outcome file) when the tree switches workspace during its listing",
+    async ({ path }) => {
+      const listing = deferredListing();
+      const fixture = createFixture({ listDirectory: listing.listDirectory });
+
+      requestReveal(path);
+      await advance();
+      expect(fixture.requestDirectoryListing).toHaveBeenCalledTimes(1);
+      fixture.setTree({ workspaceStateKey: SIBLING_WORKSPACE_STATE_KEY });
+      expect(useExplorerRevealStore.getState().requests).toEqual({});
+      await listing.release();
+      await advance(SCROLL_STALL_WINDOW_MS);
+
+      // The sibling tree has the same relative path; it must not be selected, scrolled, or toasted.
+      expect(fixture.requestDirectoryListing).toHaveBeenCalledTimes(1);
+      expect(fixture.selectExplorerEntry).not.toHaveBeenCalled();
+      expect(fixture.scroller.scrollToIndex).not.toHaveBeenCalled();
+      expect(toast.show).not.toHaveBeenCalled();
+      expect(toast.error).not.toHaveBeenCalled();
+    },
+  );
 
   it("drops a waiting request when the tree is hidden, so it never replays", async () => {
     requestReveal("README.md");

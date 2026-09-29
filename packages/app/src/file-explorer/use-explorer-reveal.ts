@@ -1,4 +1,12 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type RefObject } from "react";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type RefObject,
+} from "react";
 import { useTranslation } from "react-i18next";
 import type { LayoutChangeEvent, NativeScrollEvent, NativeSyntheticEvent } from "react-native";
 import { useRetainedPanelActive } from "@/components/retained-panel";
@@ -80,6 +88,7 @@ interface UseExplorerRevealResult {
 }
 
 interface FinishedReveal {
+  revealKey: string;
   outcome: Exclude<ExplorerRevealOutcome, "superseded">;
   plan: ExplorerRevealPlan;
   request: ExplorerRevealRequest;
@@ -118,7 +127,7 @@ async function runRevealRequest(input: {
   useExplorerRevealStore
     .getState()
     .completeReveal({ key: revealKey, requestId: request.requestId });
-  return { outcome, plan, request };
+  return { revealKey, outcome, plan, request };
 }
 
 function clearPendingReveal(revealKey: string): void {
@@ -355,36 +364,44 @@ function useRevealScroll(input: {
 }
 
 /**
- * Tracks whether this tree can still finish a reveal. Going from visible to hidden abandons the
- * workspace's pending or in-flight request, so it neither moves the tree later nor replays.
+ * Tracks which workspace's reveal this tree can still finish: the current one while visible, none
+ * while hidden or unmounted. Hiding the tree or moving it to another workspace abandons the
+ * previous workspace's pending or in-flight request, so it neither moves this tree later nor
+ * replays. `FileExplorerPane` stays mounted across workspace switches, and a sibling worktree
+ * usually has the same relative paths, so a walk for A landing after the tree shows B would
+ * select and scroll B's rows.
+ *
+ * Layout effects, so the key is current before any promise continuation can run against the new
+ * workspace's rows.
  */
 function useRevealLiveness(input: {
   isActive: boolean;
   revealKey: string | null;
   onAbandon: () => void;
-}): RefObject<boolean> {
-  const { isActive, revealKey, onAbandon } = input;
-  const isLiveRef = useRef(isActive);
-  const wasActiveRef = useRef(isActive);
+}): RefObject<string | null> {
+  const { onAbandon } = input;
+  const liveKey = input.isActive ? input.revealKey : null;
+  const liveKeyRef = useRef(liveKey);
+  const previousLiveKeyRef = useRef(liveKey);
 
-  useEffect(() => {
-    const wasActive = wasActiveRef.current;
-    wasActiveRef.current = isActive;
-    isLiveRef.current = isActive;
-    if (wasActive && !isActive && revealKey) {
-      clearPendingReveal(revealKey);
+  useLayoutEffect(() => {
+    const previousLiveKey = previousLiveKeyRef.current;
+    previousLiveKeyRef.current = liveKey;
+    liveKeyRef.current = liveKey;
+    if (previousLiveKey && previousLiveKey !== liveKey) {
+      clearPendingReveal(previousLiveKey);
       onAbandon();
     }
-  }, [isActive, onAbandon, revealKey]);
+  }, [liveKey, onAbandon]);
 
-  useEffect(() => {
-    isLiveRef.current = wasActiveRef.current;
+  useLayoutEffect(() => {
+    liveKeyRef.current = previousLiveKeyRef.current;
     return () => {
-      isLiveRef.current = false;
+      liveKeyRef.current = null;
     };
   }, []);
 
-  return isLiveRef;
+  return liveKeyRef;
 }
 
 /**
@@ -405,14 +422,15 @@ export function useExplorerReveal(input: UseExplorerRevealInput): UseExplorerRev
     revealKey ? (state.requests[revealKey] ?? null) : null,
   );
   const scroll = useRevealScroll({ listRows: input.listRows, treeListRef: input.treeListRef });
-  const isLiveRef = useRevealLiveness({ isActive, revealKey, onAbandon: scroll.cancel });
+  const liveKeyRef = useRevealLiveness({ isActive, revealKey, onAbandon: scroll.cancel });
   const startedRequestIdRef = useRef<number | null>(null);
   const canStart = isActive && input.isTreeRestored && directories.has(".");
 
   const finishReveal = useCallback(
     (result: FinishedReveal | null) => {
-      // Hidden or unmounted before finishing: abandoned, so the tree stays where it is.
-      if (!result || !isLiveRef.current) {
+      // Hidden, unmounted, or moved to another workspace before finishing: abandoned, so the
+      // tree stays where it is and says nothing.
+      if (!result || liveKeyRef.current !== result.revealKey) {
         return;
       }
       if (result.outcome === "not-found") {
@@ -430,7 +448,7 @@ export function useExplorerReveal(input: UseExplorerRevealInput): UseExplorerRev
       selectExplorerEntry(selectPath);
       scroll.scrollTo(selectPath);
     },
-    [isLiveRef, scroll, selectExplorerEntry, t, toast],
+    [liveKeyRef, scroll, selectExplorerEntry, t, toast],
   );
 
   useEffect(() => {

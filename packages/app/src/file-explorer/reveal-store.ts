@@ -8,6 +8,7 @@ import {
 
 interface ExplorerRevealStoreState {
   requests: ExplorerRevealRequests;
+  /** Returns the request's id, so a caller that fails to open the tree can roll it back. */
   requestReveal: (input: { serverId: string; workspaceStateKey: string; path: string }) => number;
   completeReveal: (input: { key: string; requestId: number }) => void;
 }
